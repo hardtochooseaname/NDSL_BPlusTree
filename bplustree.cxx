@@ -1,7 +1,8 @@
 #include <string>
 #include <iostream>
 #include <vector>
-
+#include <unistd.h>
+#include <queue>
 
 // 名字声明
 using std::vector;
@@ -50,6 +51,8 @@ public:
 
     // 获取索引对应的key值
     key_type getKey(int index){return keys[index];}
+    // 获取节点中的key列表
+    vector<key_type> & getKeys(){ return keys;}    
     // 获取索引对应的value值
     value_type getValue(int index){return values[index];}
 
@@ -59,6 +62,9 @@ public:
     // 获取孩子指针
     BPlusNode *getChild(int index){ return children[index];}
 
+    void setValue(int index, const value_type &v){
+        values[index] = v;
+    }
 
 private:
     bool leaf;
@@ -80,7 +86,32 @@ public:
     BPlusNode *getRoot(){ return root; }
 
     // 搜索key，并通过引用传递返回对应的value值，函数返回值表示是否成功查找到
-    bool searchKeyValue(const key_type &key, value_type &value);
+    bool searchKeyValue(const key_type &key, value_type &value){
+        if(this->getRoot() == nullptr){
+            std::cerr << "Error: search failed: tree is empty!" << endl;
+            return false;
+        }
+
+        // 确定key所在的节点
+        BPlusNode *p = root;
+        while(!p->isLeaf()){
+            int i = 0;
+            for(; i < p->getSize() && cmpKeys(key, p->getKey(i)) >= 0; i++);
+            p = p->getChild(i);
+        }
+
+        // 确定key在节点中的索引
+        int j = 0;
+        for(; j < p->getSize() && p->getKey(j) != key; j++);
+
+        // 确定对应的value值
+        if(j == p->getSize()){
+            std::cerr << "Error: search failed: key '" << key << "' desn't exist!" << endl;
+            return false;
+        }
+        value = p->getValue(j);
+        return true;
+    }
 
     // 在节点中找到key对应的位置
     int find_key_index(BPlusNode *node, const key_type &key){
@@ -217,22 +248,30 @@ public:
         return true;
     }
 
-    // 按节点打印
-    void print(BPlusNode *root){
-        if(root == nullptr){
-            cout << "The tree is empty!" << endl;
-            return;
+    bool modifyKeyValue(const key_type &key, const value_type &value){
+        if(this->getRoot() == nullptr){
+            std::cerr << "Error: search failed: tree is empty!" << endl;
+            return false;
         }
 
-        if(root->leaf)
-            cout << "leaf: ";
-        for(auto node : root->keys)
-            cout << node << " ";
-        cout << endl;
+        // 确定key所在的节点
+        BPlusNode *p = root;
+        while(!p->isLeaf()){
+            int i = 0;
+            for(; i < p->getSize() && cmpKeys(key, p->getKey(i)) >= 0; i++);
+            p = p->getChild(i);
+        }
 
-        if(!root->leaf)
-            for(auto node : root->children)
-                print(node);
+        // 确定key在节点中的索引
+        int j = 0;
+        for(; j < p->getSize() && p->getKey(j) != key; j++);
+
+        if(j == p->getSize()){
+            std::cerr << "Error: search failed: key '" << key << "' desn't exist!" << endl;
+            return false;
+        }
+        p->setValue(j, value);
+        return true;
     }
 
 private:
@@ -240,35 +279,38 @@ private:
 };
 
 
-bool BPlusTree::searchKeyValue(const key_type &key, value_type &value)
+
+// 层次遍历打印
+void printBPT(BPlusNode* root)
 {
-    if(this->getRoot() == nullptr){
-        std::cerr << "Error: search failed: tree is empty!" << endl;
-        return false;
+    if(root == nullptr){
+        cout << "Empty tree!" << endl;
+        return;
     }
 
-    // 确定key所在的节点
-    BPlusNode *p = root;
-    while(!p->isLeaf()){
-        int i = 0;
-        for(; i < p->getSize() && cmpKeys(key, p->getKey(i)) >= 0; i++);
-        p = p->getChild(i);
-    }
+    std::queue<BPlusNode*> Q;
+    BPlusNode *p = nullptr;
+    Q.push(root);
 
-    // 确定key在节点中的索引
-    int j = 0;
-    for(; j < p->getSize() && p->getKey(j) != key; j++);
+    cout << "B+ Tree Content: " << endl;
+    while(!Q.empty()){
+        p = Q.front();
+        Q.pop();
 
-    // 确定对应的value值
-    if(j == p->getSize()){
-        std::cerr << "Error: search failed: key '" << key << "' desn't exist!" << endl;
-        return false;
+        for(auto key: p->getKeys())
+            cout << key << " ";
+        if(p->isLeaf())
+            cout << "  |  " ;
+        else{
+            for(int i = 0; i < p->getSize()+1; i++)
+                Q.push(p->getChild(i));
+            cout << endl;
+        }
     }
-    value = p->getValue(j);
-    return true;
+    cout << endl;
 }
 
-int main()
+int main(int argc, char **argv)
 {
     BPlusTree bpt;
     bpt.insertKeyValue(3, "3");
@@ -280,18 +322,38 @@ int main()
     bpt.insertKeyValue(13, "130");
     bpt.insertKeyValue(22, "22");
     bpt.insertKeyValue(10, "10");
-    bpt.print(bpt.getRoot());
-    
-    value_type v;
-    if(bpt.searchKeyValue(15, v))
-        cout << "Value is" << v << endl;
-    else
-        cout << "not here" << endl;
 
-    if(bpt.searchKeyValue(13, v))
-        cout << "Value is " << v  << endl;
-    else
-        cout << "not here" << endl;
+    //printBPT(bpt.getRoot());
+    
+
+    int opt;
+    value_type v = "";
+    while((opt = getopt(argc, argv, ":i:s:d:m:p")) != -1){
+        switch(opt){        
+            case 'i':
+                bpt.insertKeyValue(std::stoi(optarg), argv[optind++]);
+                break;
+            case 's':
+                if(bpt.searchKeyValue(std::stoi(optarg), v))
+                    cout << "Value of key '" << optarg << "' is " << v << endl;
+                break;
+            case 'p':
+                printBPT(bpt.getRoot());
+                break;
+            case 'm':
+                if(bpt.modifyKeyValue(std::stoi(optarg), argv[optind++]))
+                    cout << "Modification done!" << endl;
+                else
+                    cout << "Modification failed" << endl;
+                break;
+            case ':':
+                cout << "Some arguments missing!" << endl;
+                break;
+            case '?':
+                cout << "Unknown option!" << endl;
+                break;
+        }
+    }
 
     return 0;
 }
