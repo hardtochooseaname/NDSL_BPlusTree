@@ -3,6 +3,8 @@
 #include <vector>
 #include <unistd.h>
 #include <queue>
+#include <algorithm>
+#include <random>
 
 // 名字声明
 using std::vector;
@@ -11,7 +13,7 @@ using std::cout;
 using std::endl;
 
 // B+树基本属性
-constexpr int leaf_max_degree = 3;
+constexpr int leaf_max_degree = 4;
 constexpr int leaf_min_degree = (leaf_max_degree+1)/2;
 constexpr int nonleaf_max_degree = leaf_max_degree;
 constexpr int nonleaf_min_degree = (nonleaf_max_degree+1)/2;
@@ -274,6 +276,264 @@ public:
         return true;
     }
 
+// 判断节点是第几个孩子
+int child_index(BPlusNode *parent, BPlusNode *node)
+{
+    int i = 0;
+    for(; i < parent->size+1 && node != parent->children[i]; i++);
+    if(i < parent->size+1)
+        return i;
+    else    // node不是parent的孩子
+        return -1;
+}
+
+// 往上改索引
+void change_index(BPlusNode *current_node, vector<BPlusNode*> path)
+{
+    key_type key = current_node->keys[0];
+    BPlusNode *parent = path.back();
+    path.pop_back();
+    int cindex = child_index(parent, current_node);
+    while(parent != root && cindex == 0){
+        current_node = parent;
+        parent = path.back();
+        path.pop_back();
+        cindex = child_index(parent, current_node);
+    }
+    if(cindex > 0){ // 往上追溯到了根节点则不需要改索引，叶子是最左下叶子，否则更新索引
+        parent->keys[cindex-1] = key;
+    }
+}
+
+// 删除键值对
+bool deleteKeyValue(const key_type &key) {
+    if (getRoot() == nullptr) {
+        std::cerr << "Error: delete failed: tree is empty!" << endl;
+        return false;
+    }
+
+    // 查找要删除键所在的叶节点
+    BPlusNode *current_node = root;
+    //BPlusNode *parent = nullptr;
+    vector<BPlusNode*> path;
+    while (!current_node->isLeaf()) {
+        int i = 0;
+        for (; i < current_node->getSize() && cmpKeys(key, current_node->getKey(i)) >= 0; i++);
+        path.push_back(current_node);
+        //parent = current_node;
+        current_node = current_node->getChild(i);
+    }
+
+    // 在叶节点中查找要删除的键的位置
+    int index = 0;
+    for (; index < current_node->getSize() && current_node->getKey(index) != key; index++);
+
+    if (index == current_node->getSize()) {
+        std::cerr << "Error: delete failed: key '" << key << "' doesn't exist!" << endl;
+        return false;
+    }
+
+    // 从叶节点中删除键值对
+    current_node->keys.erase(current_node->keys.begin() + index);
+    current_node->values.erase(current_node->values.begin() + index);
+    current_node->size--;
+
+    ////// 要判断叶节点是否是根节点且被删空了
+    if(current_node == getRoot()){
+        if(current_node->getSize() == 0)
+            root = nullptr;
+    }
+    ////// 不是根结点，要判断是否是最小key，需要改索引
+    else{
+        //cout << "判断是否是最小key，需要改索引" << endl;
+        if(index == 0 ){ // 是最小key
+            cout << "需要改索引" << endl;
+            if(current_node->size > 0)
+                change_index(current_node, path);
+            //else   
+                //cout << "当前叶节点删空了，暂时改不了索引" << endl;
+        }
+        // 触发下溢，调整叶节点
+        if (current_node->size < leaf_min_degree-1) {
+            adjustLeafNode(current_node, path);
+        }
+    } 
+
+    return true;
+}
+
+// 调整叶节点
+void adjustLeafNode(BPlusNode *node, vector<BPlusNode*> path) {
+    BPlusNode *parent = path.back();
+    //path.pop_back();
+    // 找到 node 在 parent 中的索引
+    int index = child_index(parent, node);
+
+    // 尝试从左兄弟节点中借一个键值对
+    if (index > 0 && parent->getChild(index - 1)->getSize() > leaf_min_degree-1) {
+        BPlusNode *left_sibling = parent->getChild(index - 1);
+        node->keys.insert(node->keys.begin(), left_sibling->getKey(left_sibling->getSize() - 1));
+        node->values.insert(node->values.begin(), left_sibling->getValue(left_sibling->getSize() - 1));
+        node->size++;   /////
+        left_sibling->keys.pop_back();
+        left_sibling->values.pop_back();
+        left_sibling->size--;
+        parent->keys[index - 1] = node->getKey(0);  // 更新索引
+        //cout << "从左兄弟叶子中借key，更新索引" << endl;
+    }
+    // 尝试从右兄弟节点中借一个键值对
+    else if (index < parent->getSize() && parent->getChild(index + 1)->getSize() > leaf_min_degree-1) {
+        BPlusNode *right_sibling = parent->getChild(index + 1);
+        node->keys.push_back(right_sibling->getKey(0));
+        node->values.push_back(right_sibling->getValue(0));
+        node->size++;   /////
+        right_sibling->keys.erase(right_sibling->keys.begin());
+        right_sibling->values.erase(right_sibling->values.begin());
+        right_sibling->size--;
+        parent->keys[index] = right_sibling->getKey(0); // 更新右兄弟索引
+        //cout << "从右兄弟叶子中借key，更新右兄弟叶子的索引" << endl;
+        //// 若借之前，节点为空，则还需更新当前节点的索引
+        if(node->size == 1){
+            change_index(node, path);
+            //cout << "借之前为空，还需更新当前叶子的索引" << endl;
+        }
+            
+    }
+    // 无法借键值对，则考虑合并
+    else {
+        if (index > 0) {   ////// 有左兄弟
+            //cout << "向左合并" << endl;
+            BPlusNode *left_sibling = parent->getChild(index - 1);
+            left_sibling->keys.insert(left_sibling->keys.end(), node->keys.begin(), node->keys.end());
+            left_sibling->values.insert(left_sibling->values.end(), node->values.begin(), node->values.end());
+            left_sibling->size += node->size;
+            left_sibling->next_leaf = node->next_leaf;
+            parent->keys.erase(parent->keys.begin() + index - 1);
+            parent->children.erase(parent->children.begin() + index);
+            parent->size--;
+            delete node;
+        } else {       ///// 没有左兄弟
+            //cout << "向右合并" << endl;
+            BPlusNode *right_sibling = parent->getChild(index + 1);
+            node->keys.insert(node->keys.end(), right_sibling->keys.begin(), right_sibling->keys.end());
+            node->values.insert(node->values.end(), right_sibling->values.begin(), right_sibling->values.end());
+            node->size += right_sibling->size;
+            node->next_leaf = right_sibling->next_leaf;
+            parent->keys.erase(parent->keys.begin() + index);
+            parent->children.erase(parent->children.begin() + index + 1);
+            parent->size--;
+            delete right_sibling;
+            if(node->size == 1){
+                //cout << "右边合并过来之前为空，则还需更新当前节点的索引" << endl;
+                change_index(node, path);
+            }
+        }
+
+        ////// parent是根节点，且被删空：更新根结点
+        if(parent == root){
+            if(parent->size == 0)
+                root = node;
+        }
+        ///// parent不是根结点，且触发内部节点下溢
+        else if (parent->size < nonleaf_min_degree-1) {
+            //cout << "内部节点下溢，需要调整内部节点" << endl;
+            adjustNonLeafNode(path);
+        }
+    }
+}
+
+// 调整内部节点
+void adjustNonLeafNode(vector<BPlusNode*> path) {
+    BPlusNode *node = path.back();  // 发生下溢的内部节点
+    path.pop_back();
+    BPlusNode *parent = path.back();    // 内部节点的父节点
+    int index = child_index(parent, node);
+    //cout << "内部节点index: " << index << endl;
+    ///// for (; index < parent->getSize() + 1 && parent->getChild(index) != node; index++);
+
+    // 尝试从左兄弟节点中借一个键 ///// 借键实际上借的是孩子和键的位置
+    if (index > 0 && parent->getChild(index - 1)->getSize() > nonleaf_min_degree-1) {
+        //cout << "从左兄弟借键" << endl;
+        BPlusNode *left_sibling = parent->getChild(index - 1);
+        ////// 借来的键的位置中要放的索引值是：借之前以该节点最左子树的最小值，可以在上一层索引找到
+        node->keys.insert(node->keys.begin(), parent->getKey(index - 1));
+        ////// 节点的上一层索引改为借来的孩子中的最小值，可在借的key的旧值找到
+        parent->keys[index - 1] = left_sibling->getKey(left_sibling->getSize() - 1);
+        left_sibling->keys.pop_back();
+        node->children.insert(node->children.begin(), left_sibling->getChild(left_sibling->getSize()));
+        left_sibling->children.pop_back();
+        left_sibling->size--;
+        node->size++; //////
+    }
+    // 尝试从右兄弟节点中借一个键
+    else if (index < parent->getSize() && parent->getChild(index + 1)->getSize() > nonleaf_min_degree-1) {
+        //cout << "从右兄弟借键" << endl;
+        BPlusNode *right_sibling = parent->getChild(index + 1);
+        ////// 同上：借过来的索引要改（改成借来的孩子中的最小值），右兄弟上一层索引也要改（改成右兄弟借出的key值）
+        node->keys.push_back(parent->getKey(index));
+        parent->keys[index] = right_sibling->getKey(0);
+        right_sibling->keys.erase(right_sibling->keys.begin());
+        node->children.push_back(right_sibling->getChild(0));
+        right_sibling->children.erase(right_sibling->children.begin());
+        right_sibling->size--;
+        node->size++; /////
+    }
+    // 无法借键，则考虑合并
+    else {
+        //cout << "需要合并" << endl;
+        if (index > 0) {
+            BPlusNode *left_sibling = parent->getChild(index - 1);
+            left_sibling->keys.push_back(parent->getKey(index - 1));
+            left_sibling->keys.insert(left_sibling->keys.end(), node->keys.begin(), node->keys.end());
+            left_sibling->children.insert(left_sibling->children.end(), node->children.begin(), node->children.end());
+            left_sibling->size += node->size + 1;
+            parent->keys.erase(parent->keys.begin() + index - 1);
+            parent->children.erase(parent->children.begin() + index);
+            parent->size--;
+            delete node;
+            node = left_sibling;    ///// 更新node为合并后的节点
+        } else {
+            BPlusNode *right_sibling = parent->getChild(index + 1);
+            node->keys.push_back(parent->getKey(index));
+            node->keys.insert(node->keys.end(), right_sibling->keys.begin(), right_sibling->keys.end());
+            node->children.insert(node->children.end(), right_sibling->children.begin(), right_sibling->children.end());
+            node->size += right_sibling->size + 1;
+            parent->keys.erase(parent->keys.begin() + index);
+            parent->children.erase(parent->children.begin() + index + 1);
+            parent->size--;
+            delete right_sibling;
+        }
+
+        ////// 判断parent是不是根节点，且被删空：更新根结点，这时树的层数-1
+        if(parent == root){
+            if(parent->size == 0)
+                root = node;
+        }
+        // parent不是根结点，根据是否下溢决定是否递归调整内部节点
+        else if (parent->size < nonleaf_min_degree-1) {
+            adjustNonLeafNode(path);
+        }
+    }
+}
+
+// 查找节点的父节点
+BPlusNode *findParent(BPlusNode *current_node, BPlusNode *node) {
+    if (current_node->isLeaf() || current_node->getChild(0) == node) {
+        return nullptr;
+    }
+
+    int i = 0;
+    for (; i < current_node->getSize() + 1 && current_node->getChild(i) != node; i++);
+
+    if (i <= current_node->getSize()) {
+        BPlusNode *parent = findParent(current_node->getChild(i), node);
+        if (parent != nullptr) {
+            return parent;
+        }
+    }
+    return current_node;
+}
+
 private:
     BPlusNode *root = nullptr;
 };
@@ -307,21 +567,46 @@ void printBPT(BPlusNode* root)
             cout << endl;
         }
     }
-    cout << endl;
+    cout << '\n' << endl;
+}
+
+
+bool test_insertion()
+{
+    std::vector<int> sequence;
+    for (int i = 1; i <= 1000; ++i) {
+        sequence.push_back(i);
+    }
+
+    // 使用随机数引擎和洗牌函数来随机排序序列
+    std::random_device rd;
+    std::mt19937 rng(rd());  // 随机数引擎
+    std::shuffle(sequence.begin(), sequence.end(), rng);
+
+    // 插入随机数生成B+树
+    BPlusTree bpt;
+    for(auto key : sequence)
+        bpt.insertKeyValue(key, "000");
 }
 
 int main(int argc, char **argv)
 {
     BPlusTree bpt;
-    bpt.insertKeyValue(3, "3");
-    bpt.insertKeyValue(5, "5");
-    bpt.insertKeyValue(12, "12");
-    bpt.insertKeyValue(7, "7");
-    bpt.insertKeyValue(8, "8");
-    bpt.insertKeyValue(31, "31");
+    bpt.insertKeyValue(3, "30");
+    bpt.insertKeyValue(5, "50");
+    bpt.insertKeyValue(12, "120");
+    bpt.insertKeyValue(7, "70");
+    bpt.insertKeyValue(8, "80");
+
+    bpt.insertKeyValue(31, "310");
     bpt.insertKeyValue(13, "130");
-    bpt.insertKeyValue(22, "22");
-    bpt.insertKeyValue(10, "10");
+    bpt.insertKeyValue(22, "220");
+    bpt.insertKeyValue(10, "100");
+    bpt.insertKeyValue(19, "190");
+
+    bpt.insertKeyValue(51, "510");
+    bpt.insertKeyValue(17, "170");
+    bpt.insertKeyValue(83, "830");
 
     //printBPT(bpt.getRoot());
     
@@ -336,6 +621,12 @@ int main(int argc, char **argv)
             case 's':
                 if(bpt.searchKeyValue(std::stoi(optarg), v))
                     cout << "Value of key '" << optarg << "' is " << v << endl;
+                break;
+            case 'd':
+                if(bpt.deleteKeyValue(std::stoi(optarg)))
+                    cout << "Deletion done! (" << optarg << ")" << endl;
+                else
+                    cout << "Deletion failed! (" << optarg << ")" << endl;
                 break;
             case 'p':
                 printBPT(bpt.getRoot());
