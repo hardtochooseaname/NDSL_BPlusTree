@@ -1,1 +1,4 @@
 bpt.cxx
+tmp/
+build/
+.vscode/
